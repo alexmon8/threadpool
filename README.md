@@ -4,7 +4,7 @@ A production-quality, header-only C++ thread pool implementation with advanced s
 
 ## Features
 
-### Phase 1: Core Thread Pool ✅
+### Phase 1: Core Thread Pool
 - Fixed-size thread pool with configurable worker threads
 - Thread-safe task queue with mutex/condition variable synchronization
 - `std::future`-based result retrieval
@@ -12,7 +12,7 @@ A production-quality, header-only C++ thread pool implementation with advanced s
 - Comprehensive unit tests with Boost.Test
 
 ### Phase 2: Advanced Scheduling (In Progress)
-- ✅ Priority queue support (HIGH/MEDIUM/LOW priority tasks with FIFO within same priority)
+- Priority queue support (HIGH/MEDIUM/LOW priority tasks with FIFO within same priority)
 - Work-stealing queue for load balancing (Planned)
 - Task dependency management (DAG execution) (Planned)
 
