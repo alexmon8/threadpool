@@ -14,7 +14,7 @@ A production-quality, header-only C++ thread pool implementation with advanced s
 ### Phase 2: Advanced Scheduling ✅
 - ✅ Priority queue support (HIGH/MEDIUM/LOW priority tasks with FIFO within same priority)
 - ✅ Work-stealing thread pool (per-thread queues, automatic load balancing, 3.24x faster throughput)
-- Task dependency management (DAG execution) (Planned)
+- ✅ Task dependency management (DAG execution with circular dependency detection)
 
 ### Phase 3: Performance & Memory (Planned)
 - Custom memory pool allocator for reduced allocation overhead
@@ -46,6 +46,7 @@ cd build && ctest
 ./build/examples/parallel_sum
 ./build/examples/priority_example
 ./build/examples/workstealing_example
+./build/examples/dependency_example
 
 # Run benchmarks
 ./build/benchmarks/benchmark_threadpool
@@ -132,6 +133,44 @@ int main() {
 }
 ```
 
+### Dependency Thread Pool Usage
+
+```cpp
+#include "threadpool/DependencyThreadPool.hpp"
+
+using namespace threadpool;
+
+int main() {
+    DependencyThreadPool pool(4);
+
+    // Create tasks with dependencies
+    // Task A - no dependencies
+    auto [idA, futureA] = pool.submit(Priority::HIGH, []() {
+        return "data";
+    });
+
+    // Task B - depends on A
+    auto [idB, futureB] = pool.submit(Priority::MEDIUM, {idA}, [](std::string data) {
+        return data + "_processed";
+    }, futureA.get());
+
+    // Task C - also depends on A (runs in parallel with B)
+    auto [idC, futureC] = pool.submit(Priority::MEDIUM, {idA}, [](std::string data) {
+        return data + "_validated";
+    }, futureA.get());
+
+    // Task D - depends on both B and C
+    auto [idD, futureD] = pool.submit(Priority::HIGH, {idB, idC},
+        [](std::string b, std::string c) {
+            return b + "_" + c;
+        }, futureB.get(), futureC.get());
+
+    std::cout << futureD.get() << std::endl;  // "data_processed_data_validated"
+
+    // Circular dependencies are automatically detected and rejected!
+}
+```
+
 ## Project Structure
 
 ```
@@ -139,15 +178,18 @@ ThreadPool/
 ├── include/
 │   └── threadpool/
 │       ├── ThreadPool.hpp             # Priority queue thread pool
-│       └── WorkStealingThreadPool.hpp # Work-stealing thread pool
+│       ├── WorkStealingThreadPool.hpp # Work-stealing thread pool
+│       └── DependencyThreadPool.hpp   # DAG dependency thread pool
 ├── tests/
 │   ├── test_threadpool.cpp            # Priority pool tests (24 tests)
-│   └── test_workstealing.cpp          # Work-stealing tests (20 tests)
+│   ├── test_workstealing.cpp          # Work-stealing tests (20 tests)
+│   └── test_dependency.cpp            # Dependency pool tests (24 tests)
 ├── examples/
 │   ├── basic_example.cpp              # Simple usage examples
 │   ├── parallel_sum.cpp               # Parallel computation demo
 │   ├── priority_example.cpp           # Priority scheduling demo
-│   └── workstealing_example.cpp       # Work-stealing demo
+│   ├── workstealing_example.cpp       # Work-stealing demo
+│   └── dependency_example.cpp         # DAG execution demo
 ├── benchmarks/
 │   ├── benchmark_threadpool.cpp       # Basic benchmarks
 │   └── compare_pools.cpp              # Priority vs Work-Stealing comparison
@@ -159,7 +201,7 @@ ThreadPool/
 - [x] Phase 1: Core thread pool with mutex/condition_variable
 - [x] Phase 2.1: Priority queue scheduling (HIGH/MEDIUM/LOW)
 - [x] Phase 2.2: Work-stealing queue for load balancing
-- [ ] Phase 2.3: Task dependency management (DAG)
+- [x] Phase 2.3: Task dependency management (DAG with circular dependency detection)
 - [ ] Phase 3: Custom memory allocator and performance optimization
 - [ ] Phase 4: Integration into web service (image processing API)
 

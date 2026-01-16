@@ -13,3 +13,7 @@ target_link_libraries(priority_example threadpool)
 # Work-stealing example
 add_executable(workstealing_example workstealing_example.cpp)
 target_link_libraries(workstealing_example threadpool)
+
+# Dependency thread pool example
+add_executable(dependency_example dependency_example.cpp)
+target_link_libraries(dependency_example threadpool)

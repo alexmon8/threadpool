@@ -21,6 +21,17 @@ target_link_libraries(workstealing_tests
     Boost::unit_test_framework
 )
 
+# Test executable for dependency thread pool
+add_executable(dependency_tests
+    test_dependency.cpp
+)
+
+target_link_libraries(dependency_tests
+    threadpool
+    Boost::unit_test_framework
+)
+
 # Register tests with CTest
 add_test(NAME ThreadPoolTests COMMAND threadpool_tests)
 add_test(NAME WorkStealingTests COMMAND workstealing_tests)
+add_test(NAME DependencyTests COMMAND dependency_tests)
