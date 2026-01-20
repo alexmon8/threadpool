@@ -82,7 +82,7 @@ private:
     /**
      * @brief Per-thread work queue
      */
-    struct WorkQueue {
+    struct alignas(64) WorkQueue {  // Cache line alignment to prevent false sharing
         std::deque<std::function<void()>> tasks;
         mutable std::mutex mutex;
 
@@ -230,14 +230,30 @@ auto WorkStealingThreadPool::submit(F&& f, Args&&... args)
     return result;
 }
 
+// Thread-local cache for worker ID (eliminates O(n) lookup on every submit)
+thread_local size_t cached_worker_id_ = 0;
+thread_local bool worker_id_initialized_ = false;
+
 inline size_t WorkStealingThreadPool::get_worker_id() const {
+    // Check if already initialized for this thread (O(1) fast path)
+    if (worker_id_initialized_) {
+        return cached_worker_id_;
+    }
+
+    // First call - do the O(n) lookup
     auto tid = std::this_thread::get_id();
     for (size_t i = 0; i < thread_ids_.size(); ++i) {
         if (thread_ids_[i] == tid) {
+            cached_worker_id_ = i;
+            worker_id_initialized_ = true;
             return i;
         }
     }
-    return workers_.size();  // Not a worker thread
+
+    // Not a worker thread
+    cached_worker_id_ = workers_.size();
+    worker_id_initialized_ = true;
+    return cached_worker_id_;
 }
 
 inline bool WorkStealingThreadPool::try_steal(size_t thief_id, std::function<void()>& task) {

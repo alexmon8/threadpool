@@ -27,6 +27,7 @@ enum class Priority {
     HIGH = 2
 };
 
+
 /**
  * @brief Strong type wrapper for task identifiers
  *
@@ -227,8 +228,23 @@ private:
      */
     bool has_cycle(TaskID new_task_id, const std::unordered_set<TaskID>& dependencies);
 
+    /**
+     * @brief Cleanup completed tasks to prevent memory leak
+     *
+     * Removes tasks from all_tasks_ and dependency_graph_ when:
+     * 1. Task is in COMPLETED state
+     * 2. All dependent tasks have moved past WAITING state
+     *
+     * Must be called with task_mutex_ held.
+     */
+    void cleanup_completed_tasks();
+
     // Central task registry (all tasks: waiting, ready, executing, completed)
     std::unordered_map<TaskID, std::shared_ptr<TaskNode>> all_tasks_;
+
+    // Persistent dependency graph for incremental cycle detection
+    // Maps: TaskID -> vector of tasks that depend on it (forward edges)
+    std::unordered_map<TaskID, std::vector<TaskID>> dependency_graph_;
 
     // Priority queue of tasks ready to execute (dependencies satisfied)
     std::priority_queue<std::shared_ptr<TaskNode>,
@@ -242,9 +258,14 @@ private:
     std::atomic<uint64_t> next_task_id_;
     std::atomic<uint64_t> task_sequence_;
 
-    // Synchronization primitives
-    mutable std::mutex task_mutex_;      // Protects all_tasks_
-    mutable std::mutex ready_mutex_;     // Protects ready_queue_
+    // Task cleanup tracking (to prevent memory leak)
+    std::atomic<uint64_t> completed_task_count_;
+    std::atomic<uint64_t> last_cleanup_at_;
+    static constexpr size_t CLEANUP_THRESHOLD = 1000;  // Cleanup every N completions
+
+    // Synchronization primitives (cache-aligned to prevent false sharing)
+    alignas(64) mutable std::mutex task_mutex_;      // Protects all_tasks_
+    alignas(64) mutable std::mutex ready_mutex_;     // Protects ready_queue_
     std::condition_variable ready_cv_;
 
     // Shutdown flag
@@ -256,7 +277,9 @@ private:
 // ============================================================================
 
 inline DependencyThreadPool::DependencyThreadPool(size_t num_threads)
-    : next_task_id_(1), task_sequence_(0), stop_(false)
+    : next_task_id_(1), task_sequence_(0),
+      completed_task_count_(0), last_cleanup_at_(0),
+      stop_(false)
 {
     if (num_threads == 0) {
         throw std::invalid_argument("DependencyThreadPool size must be greater than 0");
@@ -329,10 +352,17 @@ DependencyThreadPool::submit(Priority priority, const std::vector<TaskID>& depen
         for (TaskID dep : dependencies) {
             if (!dep.is_valid()) continue;
 
-            auto it = all_tasks_.find(dep);
-            if (it == all_tasks_.end()) {
+            // Check if this task ID was ever created
+            if (dep.value >= next_task_id_.load()) {
                 throw std::invalid_argument("Dependency task not found: " +
                                            std::to_string(dep.value));
+            }
+
+            auto it = all_tasks_.find(dep);
+            // If task not found but ID is valid (< next_task_id_),
+            // it was completed and cleaned up, so we can skip it
+            if (it == all_tasks_.end()) {
+                continue;  // Skip - task was completed and cleaned up
             }
 
             // Only depend on non-completed tasks
@@ -437,6 +467,24 @@ inline void DependencyThreadPool::worker_thread() {
                     ready_cv_.notify_one();
                 }
             }
+
+            // Clean up dependency graph entry for completed task
+            // This keeps the graph sparse and improves cycle detection performance
+            dependency_graph_.erase(node->id);
+
+            // Also remove edges pointing to this completed task
+            for (const auto& [task_id, edges] : dependency_graph_) {
+                auto& edge_list = dependency_graph_[task_id];
+                edge_list.erase(std::remove(edge_list.begin(), edge_list.end(), node->id),
+                               edge_list.end());
+            }
+
+            // Periodic cleanup to prevent memory leak
+            // Trigger cleanup every CLEANUP_THRESHOLD task completions
+            uint64_t completions = completed_task_count_.fetch_add(1, std::memory_order_relaxed);
+            if (completions - last_cleanup_at_.load(std::memory_order_relaxed) >= CLEANUP_THRESHOLD) {
+                cleanup_completed_tasks();
+            }
         }
     }
 }
@@ -444,52 +492,112 @@ inline void DependencyThreadPool::worker_thread() {
 inline bool DependencyThreadPool::has_cycle(TaskID new_task_id,
                                             const std::unordered_set<TaskID>& dependencies) {
     // Must be called with task_mutex_ held
+    //
+    // Incremental cycle detection using persistent dependency_graph_
+    // Complexity: O(k) where k = reachable nodes from new_task
+    // (vs O(n²) for rebuilding entire graph)
 
-    // Build temporary graph including the new task
-    std::unordered_map<TaskID, std::vector<TaskID>> graph;
-
-    // Add all existing task edges (exclude completed tasks)
-    for (const auto& [tid, node] : all_tasks_) {
-        if (node->state.load() == TaskState::COMPLETED) continue;
-
-        for (TaskID dep : node->dependencies) {
-            auto dep_it = all_tasks_.find(dep);
-            if (dep_it != all_tasks_.end() &&
-                dep_it->second->state.load() != TaskState::COMPLETED) {
-                graph[dep].push_back(tid);  // dep -> tid edge
-            }
-        }
-    }
-
-    // Add edges for new task
+    // Add forward edges to persistent graph: dep -> new_task_id
     for (TaskID dep : dependencies) {
-        graph[dep].push_back(new_task_id);
+        dependency_graph_[dep].push_back(new_task_id);
     }
 
-    // DFS cycle detection using three colors
-    enum Color { WHITE, GRAY, BLACK };
-    std::unordered_map<TaskID, Color> colors;
+    // Check if new_task_id can reach itself via its dependencies
+    // (i.e., is there a path from any dependency back to new_task_id?)
+    std::unordered_set<TaskID> visited;
+    std::unordered_set<TaskID> recursion_stack;
 
-    std::function<bool(TaskID)> dfs = [&](TaskID u) -> bool {
-        colors[u] = GRAY;
+    std::function<bool(TaskID)> dfs = [&](TaskID current) -> bool {
+        if (recursion_stack.count(current)) {
+            return true;  // Cycle detected (back edge)
+        }
 
-        if (graph.find(u) != graph.end()) {
-            for (TaskID v : graph[u]) {
-                if (colors[v] == GRAY) {
-                    return true;  // Back edge = cycle
+        if (visited.count(current)) {
+            return false;  // Already explored this path
+        }
+
+        visited.insert(current);
+        recursion_stack.insert(current);
+
+        // Explore all outgoing edges (tasks that depend on current)
+        auto it = dependency_graph_.find(current);
+        if (it != dependency_graph_.end()) {
+            for (TaskID next : it->second) {
+                // Skip completed tasks (can't form cycles)
+                auto task_it = all_tasks_.find(next);
+                if (task_it == all_tasks_.end() ||
+                    task_it->second->state.load() == TaskState::COMPLETED) {
+                    continue;
                 }
-                if (colors[v] == WHITE && dfs(v)) {
+
+                if (dfs(next)) {
                     return true;
                 }
             }
         }
 
-        colors[u] = BLACK;
+        recursion_stack.erase(current);
         return false;
     };
 
     // Start DFS from new task
-    return dfs(new_task_id);
+    bool has_cycle = dfs(new_task_id);
+
+    if (has_cycle) {
+        // Rollback edges we just added
+        for (TaskID dep : dependencies) {
+            auto& edges = dependency_graph_[dep];
+            edges.erase(std::remove(edges.begin(), edges.end(), new_task_id),
+                       edges.end());
+        }
+    }
+
+    return has_cycle;
+}
+
+inline void DependencyThreadPool::cleanup_completed_tasks() {
+    // Must be called with task_mutex_ held
+    //
+    // Strategy: Remove completed tasks that have no active dependents
+    // A task can be safely removed when:
+    // 1. It's in COMPLETED state
+    // 2. All its dependents are either non-existent or past WAITING state
+    //
+    // This prevents unbounded growth of all_tasks_ in long-running applications
+
+    std::vector<TaskID> to_remove;
+
+    for (const auto& [id, node] : all_tasks_) {
+        // Only consider completed tasks
+        if (node->state.load() != TaskState::COMPLETED) {
+            continue;
+        }
+
+        // Check if all dependents are safe to ignore
+        bool safe_to_remove = true;
+        for (TaskID dep_id : node->dependents) {
+            auto it = all_tasks_.find(dep_id);
+            // If dependent exists and is still waiting, can't remove yet
+            if (it != all_tasks_.end() &&
+                it->second->state.load() == TaskState::WAITING) {
+                safe_to_remove = false;
+                break;
+            }
+        }
+
+        if (safe_to_remove) {
+            to_remove.push_back(id);
+        }
+    }
+
+    // Remove tasks and their graph entries
+    for (TaskID id : to_remove) {
+        all_tasks_.erase(id);
+        dependency_graph_.erase(id);
+    }
+
+    // Update cleanup counter
+    last_cleanup_at_.store(completed_task_count_.load());
 }
 
 } // namespace threadpool

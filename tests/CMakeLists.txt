@@ -31,7 +31,18 @@ target_link_libraries(dependency_tests
     Boost::unit_test_framework
 )
 
+# Test executable for Phase 3 optimizations
+add_executable(phase3_tests
+    test_phase3_optimizations.cpp
+)
+
+target_link_libraries(phase3_tests
+    threadpool
+    Boost::unit_test_framework
+)
+
 # Register tests with CTest
 add_test(NAME ThreadPoolTests COMMAND threadpool_tests)
 add_test(NAME WorkStealingTests COMMAND workstealing_tests)
 add_test(NAME DependencyTests COMMAND dependency_tests)
+add_test(NAME Phase3OptimizationsTests COMMAND phase3_tests)
