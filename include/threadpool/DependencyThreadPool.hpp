@@ -16,17 +16,9 @@
 #include <algorithm>
 #include <utility>
 
+#include "threadpool/ThreadPool.hpp"  // For Priority enum
+
 namespace threadpool {
-
-/**
- * @brief Priority levels for task scheduling
- */
-enum class Priority {
-    LOW = 0,
-    MEDIUM = 1,
-    HIGH = 2
-};
-
 
 /**
  * @brief Strong type wrapper for task identifiers

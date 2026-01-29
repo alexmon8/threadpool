@@ -45,3 +45,9 @@ option(BUILD_BENCHMARKS "Build benchmarks" ON)
 if(BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
+
+# Web Service
+option(BUILD_WEBSERVICE "Build image processing web service" ON)
+if(BUILD_WEBSERVICE)
+    add_subdirectory(webservice)
+endif()

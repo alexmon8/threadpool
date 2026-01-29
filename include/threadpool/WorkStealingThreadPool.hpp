@@ -231,8 +231,8 @@ auto WorkStealingThreadPool::submit(F&& f, Args&&... args)
 }
 
 // Thread-local cache for worker ID (eliminates O(n) lookup on every submit)
-thread_local size_t cached_worker_id_ = 0;
-thread_local bool worker_id_initialized_ = false;
+inline thread_local size_t cached_worker_id_ = 0;
+inline thread_local bool worker_id_initialized_ = false;
 
 inline size_t WorkStealingThreadPool::get_worker_id() const {
     // Check if already initialized for this thread (O(1) fast path)
